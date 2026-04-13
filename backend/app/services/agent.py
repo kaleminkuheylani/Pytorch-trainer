@@ -1,11 +1,14 @@
 """LLM-powered PyTorch code analysis agent.
 
-Analyzes PyTorch training code using GPT-4o and predicts training metrics
+Analyzes PyTorch training code using GPT-4o-mini and predicts training metrics
 (loss, accuracy, epochs) without executing the code. Streams results as events.
+Includes in-memory caching to avoid repeated API calls for the same code.
 """
 
+import hashlib
 import json
 import logging
+from collections import OrderedDict
 
 from openai import AsyncOpenAI
 
@@ -19,106 +22,77 @@ from app.models.events import (
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an expert PyTorch training analyst. Given PyTorch training code, you analyze it \
-WITHOUT running it and predict the training behavior.
-
-Your task is to:
-1. Detect the model architecture, optimizer, loss function, dataset, hyperparameters.
-2. Based on your deep knowledge of deep learning, predict realistic epoch-by-epoch \
-training metrics (loss, accuracy) for the entire training run.
-3. Provide a training summary with convergence analysis and recommendations.
-
-You must respond with valid JSON matching the requested schema exactly. \
-Be realistic with predictions — consider the model complexity, dataset characteristics, \
-learning rate, and other hyperparameters. Loss should generally decrease and accuracy \
-increase, but include realistic fluctuations.
+You are a PyTorch training analyst. Analyze code WITHOUT running it. \
+Predict realistic training metrics. Respond with valid JSON only.\
 """
 
 ARCHITECTURE_PROMPT = """\
-Analyze this PyTorch code and extract the model architecture information.
-Return a JSON object with these fields:
-{
-  "model_type": "string — e.g. CNN, RNN, Transformer, MLP, ResNet, etc.",
-  "layers": ["list of layer descriptions"],
-  "optimizer": "optimizer name and config",
-  "loss_function": "loss function name",
-  "dataset": "dataset name or description",
-  "batch_size": number or null,
-  "learning_rate": number or null,
-  "total_epochs": number or null,
-  "device": "cpu or cuda"
-}
+Extract model architecture from this PyTorch code. Return JSON:
+{{"model_type":"string","layers":["descriptions"],"optimizer":"name","loss_function":"name",\
+"dataset":"name","batch_size":N,"learning_rate":N,"total_epochs":N,"device":"cpu/cuda"}}
 
-Code:
 ```python
 {code}
-```
-"""
+```"""
 
 EPOCH_PREDICTION_PROMPT = """\
-Given this PyTorch training code and architecture info, predict the training metrics \
-for epochs {start_epoch} to {end_epoch} (out of {total_epochs} total).
-
+Predict training metrics for epochs {start_epoch}-{end_epoch} (of {total_epochs}).
 Architecture: {architecture}
 
-Return a JSON array of epoch predictions, one per epoch:
-[
-  {{
-    "epoch": number,
-    "total_epochs": number,
-    "train_loss": number,
-    "val_loss": number or null,
-    "train_accuracy": number or null (0-100 percentage),
-    "val_accuracy": number or null (0-100 percentage),
-    "learning_rate": number or null,
-    "elapsed_time_estimate": "e.g. 2m 30s",
-    "eta": "estimated time remaining"
-  }}
-]
+Return JSON array:
+[{{"epoch":N,"total_epochs":N,"train_loss":N,"val_loss":N,"train_accuracy":N,\
+"val_accuracy":N,"learning_rate":N,"elapsed_time_estimate":"str","eta":"str"}}]
 
-Be realistic. Consider:
-- Initial loss should match the loss function and number of classes
-- Loss should generally decrease with realistic fluctuations
-- Accuracy should generally increase
-- Overfitting patterns if the model is too complex for the dataset
-- Learning rate effects on convergence speed
-
-Code:
 ```python
 {code}
-```
-"""
+```"""
 
 SUMMARY_PROMPT = """\
-Given this PyTorch training code and all predicted epoch metrics, provide a training summary.
-
+Summarize training results.
 Architecture: {architecture}
-Epoch metrics: {metrics}
+Metrics: {metrics}
 
-Return a JSON object:
-{{
-  "total_epochs": number,
-  "final_train_loss": number,
-  "final_val_loss": number or null,
-  "final_train_accuracy": number or null,
-  "final_val_accuracy": number or null,
-  "best_epoch": number or null,
-  "convergence_analysis": "detailed analysis of convergence behavior",
-  "recommendations": ["list of actionable recommendations to improve training"]
-}}
+Return JSON:
+{{"total_epochs":N,"final_train_loss":N,"final_val_loss":N,"final_train_accuracy":N,\
+"final_val_accuracy":N,"best_epoch":N,"convergence_analysis":"str",\
+"recommendations":["list"]}}
 
-Code:
 ```python
 {code}
-```
-"""
+```"""
+
+
+_CACHE_MAX_SIZE = 100
 
 
 class PyTorchAgent:
     """AI agent that analyzes PyTorch code and predicts training metrics."""
 
+    _cache: OrderedDict[str, dict] = OrderedDict()
+
     def __init__(self) -> None:
         self.client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+    @staticmethod
+    def _code_hash(code: str) -> str:
+        """Generate a hash key for the given code."""
+        return hashlib.sha256(code.strip().encode()).hexdigest()
+
+    @classmethod
+    def _cache_get(cls, key: str) -> dict | None:
+        """Get a cached result, returns None on miss."""
+        if key in cls._cache:
+            cls._cache.move_to_end(key)
+            return cls._cache[key]
+        return None
+
+    @classmethod
+    def _cache_set(cls, key: str, value: dict) -> None:
+        """Store a result in the cache with LRU eviction."""
+        cls._cache[key] = value
+        cls._cache.move_to_end(key)
+        while len(cls._cache) > _CACHE_MAX_SIZE:
+            cls._cache.popitem(last=False)
 
     async def _call_llm(self, prompt: str) -> str:
         """Call the OpenAI API and return the response text."""
@@ -152,11 +126,18 @@ class PyTorchAgent:
 
     async def detect_architecture(self, code: str) -> ArchitectureInfo:
         """Detect the model architecture from PyTorch code."""
+        cache_key = self._code_hash(code)
+        cached = self._cache_get(f"arch:{cache_key}")
+        if cached is not None:
+            logger.info("Cache hit for architecture detection")
+            return ArchitectureInfo(**cached)
+
         prompt = ARCHITECTURE_PROMPT.format(code=code)
         response = await self._call_llm(prompt)
         data = self._parse_json(response)
         if isinstance(data, list):
             data = data[0] if data else {}
+        self._cache_set(f"arch:{cache_key}", data)
         return ArchitectureInfo(**data)
 
     async def predict_epochs(
@@ -196,6 +177,12 @@ class PyTorchAgent:
     ) -> TrainingSummary:
         """Generate a training summary based on all predicted metrics."""
         metrics_json = json.dumps([m.model_dump() for m in all_metrics])
+        cache_key = self._code_hash(code + metrics_json)
+        cached = self._cache_get(f"summary:{cache_key}")
+        if cached is not None:
+            logger.info("Cache hit for training summary")
+            return TrainingSummary(**cached)
+
         prompt = SUMMARY_PROMPT.format(
             code=code,
             architecture=architecture.model_dump_json(),
@@ -205,6 +192,7 @@ class PyTorchAgent:
         data = self._parse_json(response)
         if isinstance(data, list):
             data = data[0] if data else {}
+        self._cache_set(f"summary:{cache_key}", data)
         return TrainingSummary(**data)
 
 
