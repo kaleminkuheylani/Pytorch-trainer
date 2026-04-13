@@ -11,7 +11,23 @@ import type {
   TrainingSummary,
 } from "@/types/events";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/ws/analyze";
+function getWsUrl(): string {
+  if (process.env.NEXT_PUBLIC_WS_URL) {
+    return process.env.NEXT_PUBLIC_WS_URL;
+  }
+  if (typeof window !== "undefined" && window.location.hostname !== "localhost") {
+    // Production: use NEXT_PUBLIC_API_HOST or fallback to same origin
+    const apiHost = process.env.NEXT_PUBLIC_API_HOST;
+    if (apiHost) {
+      const protocol = apiHost.startsWith("https") ? "wss:" : "ws:";
+      const host = apiHost.replace(/^https?:\/\//, "");
+      return `${protocol}//${host}/api/ws/analyze`;
+    }
+  }
+  return "ws://localhost:8000/api/ws/analyze";
+}
+
+const WS_URL = getWsUrl();
 
 export interface AgentState {
   connected: boolean;

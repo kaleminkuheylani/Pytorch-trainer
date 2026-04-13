@@ -91,6 +91,35 @@ npm run dev
 
 Open http://localhost:3000, type PyTorch code, and click **Submit (Return)**.
 
+## Deployment (Production)
+
+### Backend → Railway
+
+1. [Railway Dashboard](https://railway.app/dashboard) → **New Project** → **Deploy from GitHub repo**
+2. Root directory olarak `backend/` seçin
+3. Environment variables ekleyin:
+   - `OPENAI_API_KEY` = `sk-...`
+   - `OPENAI_MODEL` = `gpt-4o` (opsiyonel)
+   - `STREAM_INTERVAL_SECONDS` = `30` (opsiyonel)
+4. Deploy edin — Railway otomatik olarak Python'u algılayıp `Procfile`'ı kullanacak
+5. Deploy sonrası Railway URL'inizi kopyalayın (örn: `https://pytorch-agent-stream-production.up.railway.app`)
+
+### Frontend → Vercel
+
+1. [Vercel Dashboard](https://vercel.app/new) → **Import Git Repository**
+2. Root directory olarak `frontend/` seçin
+3. Framework: **Next.js** (otomatik algılanır)
+4. Environment variables ekleyin:
+   - `NEXT_PUBLIC_API_HOST` = `https://pytorch-agent-stream-production.up.railway.app` (Railway URL'niz)
+   - veya `NEXT_PUBLIC_WS_URL` = `wss://pytorch-agent-stream-production.up.railway.app/api/ws/analyze`
+5. Deploy edin
+
+> **Not:** `NEXT_PUBLIC_API_HOST` veya `NEXT_PUBLIC_WS_URL` set edilmezse, frontend varsayılan olarak `ws://localhost:8000` kullanır (sadece local development için).
+
+### CORS Ayarı
+
+Backend zaten tüm origin'lere izin veriyor (`allow_origins=["*"]`). Production'da bunu Vercel domain'inizle sınırlandırabilirsiniz.
+
 ## Configuration
 
 | Environment Variable       | Default           | Description                           |
@@ -98,10 +127,12 @@ Open http://localhost:3000, type PyTorch code, and click **Submit (Return)**.
 | `OPENAI_API_KEY`          | —                 | OpenAI API key (required)             |
 | `OPENAI_MODEL`            | `gpt-4o`          | LLM model to use                      |
 | `STREAM_INTERVAL_SECONDS` | `30`              | Seconds between epoch predictions     |
-| `NEXT_PUBLIC_WS_URL`      | `ws://localhost:8000/api/ws/analyze` | WebSocket endpoint URL |
+| `NEXT_PUBLIC_WS_URL`      | `ws://localhost:8000/api/ws/analyze` | Full WebSocket endpoint URL |
+| `NEXT_PUBLIC_API_HOST`    | —                 | Backend host URL (Railway URL)        |
 
 ## Tech Stack
 
 - **Backend:** FastAPI, WebSocket, OpenAI API, Pydantic
-- **Frontend:** Next.js 15, TypeScript, Tailwind CSS, Monaco Editor, Recharts
+- **Frontend:** Next.js 16, TypeScript, Tailwind CSS, Monaco Editor, Recharts
 - **AI:** GPT-4o for code analysis and metric prediction
+- **Deployment:** Railway (backend) + Vercel (frontend)
